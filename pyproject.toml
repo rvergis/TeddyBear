@@ -1,0 +1,14 @@
+[project]
+name = "teddy-bear"
+version = "0.1.0"
+description = "Local AI Teddy Bear"
+requires-python = ">=3.10"
+dependencies = [
+    "langchain-xai",
+    "opencv-python",
+    "pyttsx3",
+    "python-dotenv",
+]
+
+[tool.uv]
+package = false
