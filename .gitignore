@@ -181,3 +181,5 @@ cython_debug/
 .cursorindexingignore
 current.jpg
 debug_frame_1.jpg
+debug_current.jpg
+current.jpg
