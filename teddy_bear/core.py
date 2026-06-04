@@ -32,7 +32,7 @@ def save_memory():
     MEMORY_FILE.write_text(json.dumps(memory, indent=2))
 
 async def main():
-    print("🧸 Teddy Bear - Improved Person Memory")
+    print("🧸 Teddy Bear - Fixed Person Detection")
 
     while True:
         subprocess.run(["imagesnap", "-w", "1", "current.jpg"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -41,39 +41,43 @@ async def main():
             with open("current.jpg", "rb") as f:
                 base64_img = base64.b64encode(f.read()).decode('utf-8')
 
-            # Get description for identification
             msg = HumanMessage(content=[
-                {"type": "text", "text": "Describe this person briefly for future recognition: hair, glasses, clothes color, face shape."},
+                {"type": "text", "text": "Is there a person in this image? Answer clearly with YES or NO first, then describe them briefly."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
             ])
 
             vision_resp = llm.invoke([msg])
-            description = vision_resp.content.strip()
-            print(f"Vision: {description}")
+            vision_text = vision_resp.content.strip()
+            print(f"Grok Vision: {vision_text}")
 
-            # Better matching
-            known = False
-            for name, stored_desc in memory["known_people"].items():
-                if name.lower() in description.lower() or description.lower() in stored_desc.lower():
-                    print(f"Teddy: Hi {name}!")
-                    known = True
-                    break
+            # Only proceed if person is detected
+            if "yes" in vision_text.lower() or "person" in vision_text.lower():
+                # Try to match known person
+                known = False
+                for name, stored_desc in memory["known_people"].items():
+                    if name.lower() in vision_text.lower():
+                        print(f"Teddy: Hi {name}!")
+                        known = True
+                        break
 
-            if not known:
-                print("Teddy: Who are you?")
-                # Voice input
-                audio = sd.rec(int(5 * 16000), samplerate=16000, channels=1, dtype=np.float32)
-                sd.wait()
-                sf.write("temp.wav", audio, 16000)
-                result = transcribe("temp.wav")
-                text = result["text"].strip()
+                if not known:
+                    print("Teddy: Who are you?")
+                    # Voice input
+                    audio = sd.rec(int(5 * 16000), samplerate=16000, channels=1, dtype=np.float32)
+                    sd.wait()
+                    sf.write("temp.wav", audio, 16000)
+                    result = transcribe("temp.wav")
+                    text = result["text"].strip()
 
-                if text:
-                    print(f"You said: {text}")
-                    name = text.title()
-                    memory["known_people"][name] = description
-                    save_memory()
-                    print(f"Teddy: Hi {name}! Nice to meet you!")
+                    if text:
+                        print(f"You said: {text}")
+                        name = text.title()
+                        memory["known_people"][name] = vision_text
+                        save_memory()
+                        print(f"Teddy: Hi {name}! Nice to meet you!")
+            else:
+                print("No person detected - waiting...")
+
         except Exception as e:
             print(f"Error: {e}")
 
