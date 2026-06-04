@@ -9,6 +9,9 @@ dependencies = [
     "python-dotenv",
     "numpy>=2.2.6",
     "opencv-python-headless>=4.13.0.92",
+    "sounddevice>=0.5.5",
+    "soundfile>=0.13.1",
+    "mlx-whisper>=0.4.3",
 ]
 
 [tool.uv]
