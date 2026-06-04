@@ -15,9 +15,11 @@ if not XAI_API_KEY:
 llm = ChatXAI(model="grok-4-1-fast-reasoning", temperature=0.7, api_key=XAI_API_KEY)
 
 async def main():
-    print("🧸 Teddy Bear using Camera 0 (Mac camera)")
+    print("🧸 Teddy Bear with Debug Images")
 
     cap = cv2.VideoCapture(0)
+
+    frame_count = 0
 
     while True:
         ret, frame = cap.read()
@@ -25,6 +27,13 @@ async def main():
             await asyncio.sleep(3)
             continue
 
+        frame_count += 1
+        
+        # Save raw debug image
+        cv2.imwrite(f"debug_frame_{frame_count}.jpg", frame)
+        print(f"✅ Saved debug_frame_{frame_count}.jpg")
+
+        # Low res for Grok
         small = cv2.resize(frame, (480, 360))
         _, buffer = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, 70])
         base64_img = base64.b64encode(buffer).decode('utf-8')
