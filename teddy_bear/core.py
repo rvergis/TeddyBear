@@ -462,13 +462,15 @@ async def main():
                 else:
                     print("   No person detected.")
 
-                # Room scanning: describe scene, objects, environment when user moves the laptop
+                # Room scanning: describe scene as user pans the camera
                 if scanning and scan_remaining > 0:
                     scan_remaining -= 1
                     scene_desc = describe_scene("current.jpg")
                     if scene_desc:
                         print(f"Teddy sees: {scene_desc}")
-                        # Minimal talk: only speak if a new person is mentioned (handled in person detection path)
+                        # Speak the scene description as the camera is panned
+                        short = scene_desc[:110] + "..." if len(scene_desc) > 110 else scene_desc
+                        speak(short)
                     if scan_remaining <= 0:
                         scanning = False
 
