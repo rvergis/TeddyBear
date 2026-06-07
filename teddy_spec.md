@@ -37,17 +37,27 @@ If the model cannot confidently match a person due to these variations, it shoul
 ## Behavior Flow
 1. Capture image every few seconds.
 2. If a person is detected:
-   - **Known person** (matches a name in memory, subject to cooldown): Immediately greet by name ("Hi Ron, I'm Teddy").
-   - **Unknown person**: Ask "Who are you?", then follow the name confirmation process below.
-3. Name confirmation for unknown people (must succeed before remembering):
-   - Listen for the spoken name.
-   - Confirm the candidate name out loud (e.g. "I heard [Name]. Is that correct?").
+   - Identify or learn the person (using vision + voice confirmation).
+   - Greet them ("Hi <name>, I'm Teddy") if appropriate.
+   - If this is the first/main person in the session, ask the main user: "Move the laptop around the room so I can look for other people."
+3. While the user moves the laptop (scanning the room):
+   - For any newly seen person (not matching known people):
+     - Describe them using vision (e.g. "I see a middle-aged man with short dark receding hair, mustache, and olive skin tone.").
+     - Ask the main user to identify by spelling: "I see [description]. Can you please spell out their name letter by letter?"
+     - Follow the name confirmation process.
+     - Once confirmed, store in memory with the visual description (to track other people).
+     - Greet the new person: "Hi <other person>, I'm Teddy".
+4. Name requests for unknown people (must succeed before remembering):
+   - Always request names by spelling out letter by letter initially (for the main person or others): "Can you please spell out your name letter by letter?" or with description for others.
+   - Listen for the spelled letters and reconstruct the name.
+   - Confirm the candidate name out loud (e.g. "[Name]?").
    - Loop on confirmation:
-     - Affirmative response → accept the name, greet ("Hi <name>, I'm Teddy"), store in memory with a visual description, and remember for future.
-     - Negative response or name correction in the reply → ask for the name again and repeat confirmation.
-     - Unclear reply → ask for clarification and stay in the confirmation loop.
-   - Use a safety limit on attempts. On repeated failure, give a polite message without storing the name.
-4. Only store names in memory after explicit user confirmation during the voice interaction.
+     - Affirmative response → accept the name, greet ("Hi <name>, I'm Teddy"), store in memory with a visual description.
+     - Negative response → loop to ask spelling again.
+     - Name correction in the reply → switch candidate and re-confirm.
+     - Unclear reply → repeat the confirmation question.
+   - Use a safety limit on attempts. On repeated failure, give a short message without storing the name.
+5. Only store names in memory after explicit confirmation from the main user. Known people are greeted directly (subject to cooldown). The main user can scan the room at any time by moving the laptop to discover and register additional people. Names are always initially requested via spelling.
 
 ## Keep It Simple
 - No complex emotions yet
@@ -62,12 +72,13 @@ If the model cannot confidently match a person due to these variations, it shoul
 
 ## Name Learning and Confirmation
 - Teddy must never permanently remember a person's name until the person has explicitly confirmed it during the voice interaction.
-- After extracting a candidate name from the user's speech (using mlx-whisper), Teddy should immediately confirm it out loud, for example: "I heard [Name]. Is that correct?"
+- Names are always requested initially by spelling out letter by letter: "Can you please spell out your name letter by letter?" (or "I see [description]. Can you please spell out their name letter by letter?" when identifying others during a room scan).
+- After extracting the spelled name, immediately confirm it out loud, for example: "I heard [Name]. Is that correct? Please say yes or no."
 - Enter a confirmation loop:
-  - On affirmative response (yes, yeah, correct, etc.): accept the name, greet with "Hi <name>, I'm Teddy", store it in memory with a visual description, and set last_greeted.
-  - On negative response (no, nope, wrong, etc.): if this is the first incorrect attempt, on the next name request ask the person to spell out their name letter by letter (e.g. "Can you please spell out your name letter by letter?"). On subsequent retries, continue using spelling mode. Parse the spelled response (e.g. "R O N", "R as in Romeo O N") by extracting individual letters to form the candidate name.
-  - If the confirmation response contains a different name (e.g. "No, it's Sarah"), switch the candidate name and re-confirm the new one.
-  - On unclear responses, politely ask for clarification ("Please say yes, no, or tell me the correct name") and stay in the confirmation loop.
+  - On affirmative response: accept the name, greet with "Hi <name>, I'm Teddy", store it in memory with a visual description, and set last_greeted.
+  - On negative response: loop to ask spelling again.
+  - If the confirmation response contains a different name (e.g. "No, S-A-R-A-H"), switch the candidate name and re-confirm.
+  - On unclear responses: repeat the confirmation question.
 - Include a reasonable safety limit on total attempts (e.g. 5-6) to prevent the interaction from looping forever; on failure fall back to a polite message without saving the name.
 - The confirmation step only applies to new/unknown people. Known people are greeted directly (subject to the cooldown).
 

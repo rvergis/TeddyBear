@@ -319,11 +319,39 @@ def should_greet(person: dict | None) -> bool:
         return True
 
 
+def describe_scene(image_path: str) -> str:
+    """Describe the current scene, objects, environment, and any people for room scanning."""
+    try:
+        with open(image_path, "rb") as f:
+            base64_img = base64.b64encode(f.read()).decode("utf-8")
+
+        prompt = "Describe the scene, objects, furniture, environment, and any people visible. Be concise (1-2 sentences). Note any distinct people with brief appearance details if present."
+
+        msg = HumanMessage(
+            content=[
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"},
+                },
+            ]
+        )
+
+        resp = llm.invoke([msg])
+        return resp.content.strip()
+    except Exception as e:
+        print(f"Scene description error: {e}")
+        return ""
+
+
 async def main():
     print("🧸 Teddy Bear — camera + vision + memory")
     memory = load_memory()
     print(f"   Loaded {len(memory.get('known_people', {}))} known people.")
 
+    main_person = None
+    scanning = False
+    scan_remaining = 0
     shutdown_event = asyncio.Event()
 
     def _request_shutdown():
@@ -338,7 +366,7 @@ async def main():
             if not capture_image("current.jpg"):
                 print("⚠️  Capture failed, retrying soon...")
                 try:
-                    await asyncio.wait_for(shutdown_event.wait(), timeout=2)
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=1)
                 except asyncio.TimeoutError:
                     continue
                 continue
@@ -358,15 +386,20 @@ async def main():
                                 if fresh_desc:
                                     person["desc"] = fresh_desc
                             save_memory(memory)
+
+                            if main_person is None:
+                                main_person = known_name
+                                speak("Move the laptop to scan.")
+                                print("Teddy: Move the laptop to scan.")
+                                scanning = True
+                                scan_remaining = 30  # scan for ~30 seconds while user moves the laptop
                         else:
                             print(f"   (saw {known_name} — skipping repeat greeting)")
                     else:
-                        # Unknown person: ask for name, then confirm in a loop until they say it's correct.
-                        # See "Name Learning and Confirmation" section in teddy_spec.md.
-                        # After first incorrect name, switch to asking the user to spell the name letter by letter.
+                        # Unknown person: ask for name by spelling it out letter by letter (always),
+                        # then confirm. See "Name Learning and Confirmation" section in teddy_spec.md.
                         confirmed_name = None
                         current_candidate = None
-                        spelling_mode = False
                         max_loops = 6  # safety limit to avoid infinite listening
                         loops = 0
 
@@ -374,26 +407,23 @@ async def main():
                             loops += 1
 
                             if current_candidate is None:
-                                if spelling_mode:
-                                    speak("Can you please spell out your name letter by letter?")
-                                    print("Teddy: Can you please spell out your name letter by letter?")
-                                    transcript = listen_for_response(6.0)
-                                    current_candidate = extract_spelled_name(transcript)
+                                if main_person is not None:
+                                    desc = fresh_desc or "someone new"
+                                    speak(f"I see {desc}. Spell their name.")
+                                    print(f"Teddy: I see {desc}. Spell their name.")
                                 else:
-                                    speak("Who are you?")
-                                    print("Teddy: Who are you?")
-                                    transcript = listen_for_response(5.5)
-                                    current_candidate = extract_name(transcript)
+                                    speak("Spell your name.")
+                                    print("Teddy: Spell your name.")
+                                transcript = listen_for_response(6.0)
+                                current_candidate = extract_spelled_name(transcript)
 
                             if not current_candidate:
-                                speak("Sorry, I didn't catch your name.")
-                                print("Teddy: Sorry, I didn't catch that.")
                                 current_candidate = None
                                 continue
 
                             # Confirmation step
-                            speak(f"I heard {current_candidate}. Is that correct? Please say yes or no.")
-                            print(f"Teddy: I heard {current_candidate}. Is that correct? Please say yes or no.")
+                            speak(f"{current_candidate}?")
+                            print(f"Teddy: {current_candidate}?")
                             response = listen_for_response(4.5)
 
                             # Allow user to correct the name in the same response (e.g. "No, it's Sarah")
@@ -405,14 +435,10 @@ async def main():
                             if is_affirmative(response):
                                 confirmed_name = current_candidate
                             elif is_negative(response):
-                                speak("Okay, can you tell me your name again?")
-                                print("Teddy: Okay, let's try again.")
                                 current_candidate = None
-                                spelling_mode = True  # activate spelling mode for the next name request
                             else:
-                                # Unclear response - ask for clarification
-                                speak("Sorry, please say yes if that's right, no if it's wrong, or tell me the correct name.")
-                                print("Teddy: Sorry, I didn't understand. Please say yes, no, or correct me.")
+                                # Unclear: just repeat the confirmation question next loop
+                                pass
 
                         if confirmed_name:
                             memory["known_people"][confirmed_name] = {
@@ -423,19 +449,35 @@ async def main():
                             greeting = f"Hi {confirmed_name}, I'm Teddy"
                             print(f"Teddy: {greeting}")
                             speak(greeting)
+
+                            if main_person is None:
+                                main_person = confirmed_name
+                                speak("Move the laptop to scan.")
+                                print("Teddy: Move the laptop to scan.")
+                                scanning = True
+                                scan_remaining = 30  # scan for ~30 seconds while user moves the laptop
                         else:
-                            fallback = "Sorry, I had trouble getting your name. Nice to meet you anyway!"
-                            print(f"Teddy: {fallback}")
-                            speak(fallback)
+                            print("Teddy: Can't get name.")
+                            speak("Can't get name.")
                 else:
                     print("   No person detected.")
+
+                # Room scanning: describe scene, objects, environment when user moves the laptop
+                if scanning and scan_remaining > 0:
+                    scan_remaining -= 1
+                    scene_desc = describe_scene("current.jpg")
+                    if scene_desc:
+                        print(f"Teddy sees: {scene_desc}")
+                        # Minimal talk: only speak if a new person is mentioned (handled in person detection path)
+                    if scan_remaining <= 0:
+                        scanning = False
 
             except Exception as e:
                 print(f"Error in main loop: {e}")
 
             if not shutdown_event.is_set():
                 try:
-                    await asyncio.wait_for(shutdown_event.wait(), timeout=5)
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=1)
                 except asyncio.TimeoutError:
                     pass
 
