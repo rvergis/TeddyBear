@@ -1,9 +1,11 @@
 import asyncio
 import subprocess
 import base64
+import signal
 import sounddevice as sd
 import numpy as np
 import soundfile as sf
+import re
 from mlx_whisper import transcribe
 from langchain_xai import ChatXAI
 from langchain_core.messages import HumanMessage
@@ -23,6 +25,9 @@ llm = ChatXAI(model="grok-4-1-fast-reasoning", temperature=0.3, api_key=XAI_API_
 
 MEMORY_FILE = Path("teddy_memory.json")
 GREET_COOLDOWN_SECONDS = 180  # avoid repeating greetings while someone lingers
+
+# Track which male voice was successfully selected (for debugging)
+_VOICE = None
 
 
 def save_memory(memory: dict):
@@ -51,7 +56,31 @@ def load_memory() -> dict:
 
 
 def speak(text: str):
-    """Speak using Mac 'say' (high quality, zero extra deps). Falls back silently."""
+    """Speak using Mac 'say' (high quality, zero extra deps).
+    Uses 'Alex' voice if available.
+    """
+    # Voice preference order: Alex first, then other voices as fallbacks.
+    voices = [
+        "Eddy (English (US))",
+    ]
+    for voice in voices:
+        try:
+            result = subprocess.run(
+                ["say", "-v", voice, text],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if result.returncode == 0:
+                global _VOICE
+                if _VOICE is None:
+                    _VOICE = voice
+                    print(f"[Voice: {voice}]")  # one-time info on selected voice
+                return  # success
+        except Exception:
+            continue
+
+    # Final fallback: default system voice (no -v flag)
     try:
         subprocess.run(
             ["say", text],
@@ -195,7 +224,15 @@ def extract_name(transcript: str) -> str | None:
         return None
 
     t = transcript.strip()
-    lower = t.lower()
+    lower = t.lower().strip(".,!? ")
+
+    # Reject obvious non-name words that commonly appear in confirmation responses
+    non_name_words = {
+        "yes", "no", "yeah", "yep", "yup", "nope", "nah", "ok", "okay",
+        "correct", "right", "wrong", "sure", "affirmative", "negative", "incorrect"
+    }
+    if lower in non_name_words:
+        return None
 
     for prefix in ("my name is ", "i am ", "i'm ", "call me ", "it's ", "this is ", "name is "):
         if lower.startswith(prefix):
@@ -207,13 +244,66 @@ def extract_name(transcript: str) -> str | None:
     # Capitalized words are often names
     caps = [w.strip(".,!?\"' ") for w in t.split() if w and w[0].isupper() and w.strip(".,!?\"' ").isalpha()]
     if caps:
-        return caps[-1].title()
+        candidate = caps[-1].title()
+        if candidate.lower() not in non_name_words:
+            return candidate
 
     # Last word fallback
     last = t.split()[-1].strip(".,!?\"' ")
     if last and len(last) > 1 and last[0].isalpha():
-        return last.title()
+        candidate = last.title()
+        if candidate.lower() not in non_name_words:
+            return candidate
     return None
+
+
+def extract_spelled_name(transcript: str) -> str | None:
+    """Extract a name when the user is spelling it out letter by letter.
+    Handles things like "R O N", "R as in Romeo, O, N", or "R O N as in Ron".
+    Falls back to normal name extraction if no clear spelling is detected.
+    """
+    if not transcript:
+        return None
+    t = transcript.lower().strip()
+
+    # Remove common filler phrases like "as in ..."
+    t = re.sub(r'\b(as in|like|for example)\s+\w+', '', t)
+
+    # Extract individual single letters (a-z)
+    letters = re.findall(r'\b([a-z])\b', t)
+    if len(letters) >= 2:
+        name = ''.join(letters).title()
+        if len(name) >= 2 and name[0].isalpha():
+            return name
+
+    # Fallback: first letters of words
+    words = re.findall(r'\b([a-z]+)\b', t)
+    if words and len(words) >= 2:
+        first_letters = ''.join(w[0] for w in words)
+        if len(first_letters) >= 2:
+            return first_letters.title()
+
+    # Final fallback to the regular name extractor
+    return extract_name(transcript)
+
+
+def is_affirmative(text: str) -> bool:
+    """Heuristic check if spoken response sounds like confirmation / yes."""
+    if not text:
+        return False
+    t = text.lower().strip()
+    yes_words = ("yes", "yeah", "yep", "yup", "correct", "right", "that's right",
+                 "that's correct", "yessir", "sure", "uh huh", "mm-hmm", "affirmative")
+    return any(word in t or t.startswith(word) for word in yes_words)
+
+
+def is_negative(text: str) -> bool:
+    """Heuristic check if spoken response sounds like denial / no."""
+    if not text:
+        return False
+    t = text.lower().strip()
+    no_words = ("no", "nope", "nah", "wrong", "not", "that's not", "negative", "incorrect")
+    return any(word in t or t.startswith(word) for word in no_words)
 
 
 def should_greet(person: dict | None) -> bool:
@@ -234,56 +324,128 @@ async def main():
     memory = load_memory()
     print(f"   Loaded {len(memory.get('known_people', {}))} known people.")
 
-    while True:
-        if not capture_image("current.jpg"):
-            print("⚠️  Capture failed, retrying soon...")
-            await asyncio.sleep(2)
-            continue
+    shutdown_event = asyncio.Event()
 
-        try:
-            has_person, known_name, fresh_desc = vision_detect_and_identify("current.jpg", memory)
+    def _request_shutdown():
+        shutdown_event.set()
 
-            if has_person:
-                if known_name:
-                    person = memory["known_people"].get(known_name)
-                    if should_greet(person):
-                        greeting = f"Hi {known_name}!"
-                        print(f"Teddy: {greeting}")
-                        speak(greeting)
-                        if isinstance(person, dict):
-                            person["last_greeted"] = datetime.now().isoformat()
-                            if fresh_desc:
-                                person["desc"] = fresh_desc
-                        save_memory(memory)
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _request_shutdown)
+
+    try:
+        while not shutdown_event.is_set():
+            if not capture_image("current.jpg"):
+                print("⚠️  Capture failed, retrying soon...")
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=2)
+                except asyncio.TimeoutError:
+                    continue
+                continue
+
+            try:
+                has_person, known_name, fresh_desc = vision_detect_and_identify("current.jpg", memory)
+
+                if has_person:
+                    if known_name:
+                        person = memory["known_people"].get(known_name)
+                        if should_greet(person):
+                            greeting = f"Hi {known_name}, I'm Teddy"
+                            print(f"Teddy: {greeting}")
+                            speak(greeting)
+                            if isinstance(person, dict):
+                                person["last_greeted"] = datetime.now().isoformat()
+                                if fresh_desc:
+                                    person["desc"] = fresh_desc
+                            save_memory(memory)
+                        else:
+                            print(f"   (saw {known_name} — skipping repeat greeting)")
                     else:
-                        print(f"   (saw {known_name} — skipping repeat greeting)")
+                        # Unknown person: ask for name, then confirm in a loop until they say it's correct.
+                        # See "Name Learning and Confirmation" section in teddy_spec.md.
+                        # After first incorrect name, switch to asking the user to spell the name letter by letter.
+                        confirmed_name = None
+                        current_candidate = None
+                        spelling_mode = False
+                        max_loops = 6  # safety limit to avoid infinite listening
+                        loops = 0
+
+                        while loops < max_loops and confirmed_name is None and not shutdown_event.is_set():
+                            loops += 1
+
+                            if current_candidate is None:
+                                if spelling_mode:
+                                    speak("Can you please spell out your name letter by letter?")
+                                    print("Teddy: Can you please spell out your name letter by letter?")
+                                    transcript = listen_for_response(6.0)
+                                    current_candidate = extract_spelled_name(transcript)
+                                else:
+                                    speak("Who are you?")
+                                    print("Teddy: Who are you?")
+                                    transcript = listen_for_response(5.5)
+                                    current_candidate = extract_name(transcript)
+
+                            if not current_candidate:
+                                speak("Sorry, I didn't catch your name.")
+                                print("Teddy: Sorry, I didn't catch that.")
+                                current_candidate = None
+                                continue
+
+                            # Confirmation step
+                            speak(f"I heard {current_candidate}. Is that correct? Please say yes or no.")
+                            print(f"Teddy: I heard {current_candidate}. Is that correct? Please say yes or no.")
+                            response = listen_for_response(4.5)
+
+                            # Allow user to correct the name in the same response (e.g. "No, it's Sarah")
+                            corrected = extract_name(response)
+                            if corrected and corrected.lower() != current_candidate.lower():
+                                current_candidate = corrected
+                                continue  # immediately re-confirm the corrected name
+
+                            if is_affirmative(response):
+                                confirmed_name = current_candidate
+                            elif is_negative(response):
+                                speak("Okay, can you tell me your name again?")
+                                print("Teddy: Okay, let's try again.")
+                                current_candidate = None
+                                spelling_mode = True  # activate spelling mode for the next name request
+                            else:
+                                # Unclear response - ask for clarification
+                                speak("Sorry, please say yes if that's right, no if it's wrong, or tell me the correct name.")
+                                print("Teddy: Sorry, I didn't understand. Please say yes, no, or correct me.")
+
+                        if confirmed_name:
+                            memory["known_people"][confirmed_name] = {
+                                "desc": fresh_desc or "First seen " + datetime.now().strftime("%Y-%m-%d"),
+                                "last_greeted": datetime.now().isoformat(),
+                            }
+                            save_memory(memory)
+                            greeting = f"Hi {confirmed_name}, I'm Teddy"
+                            print(f"Teddy: {greeting}")
+                            speak(greeting)
+                        else:
+                            fallback = "Sorry, I had trouble getting your name. Nice to meet you anyway!"
+                            print(f"Teddy: {fallback}")
+                            speak(fallback)
                 else:
-                    # Unknown → ask, learn, remember per spec
-                    speak("Who are you?")
-                    print("Teddy: Who are you?")
+                    print("   No person detected.")
 
-                    transcript = listen_for_response(5.5)
-                    name = extract_name(transcript)
+            except Exception as e:
+                print(f"Error in main loop: {e}")
 
-                    if name:
-                        memory["known_people"][name] = {
-                            "desc": fresh_desc or "First seen " + datetime.now().strftime("%Y-%m-%d"),
-                            "last_greeted": datetime.now().isoformat(),
-                        }
-                        save_memory(memory)
-                        greeting = f"Hi {name}! Nice to meet you!"
-                        print(f"Teddy: {greeting}")
-                        speak(greeting)
-                    else:
-                        print("Teddy: Sorry, I didn't catch that.")
-            else:
-                print("   No person detected.")
+            if not shutdown_event.is_set():
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
 
-        except Exception as e:
-            print(f"Error in main loop: {e}")
-
-        await asyncio.sleep(5)
+    finally:
+        save_memory(memory)
+        print("\nShutting down cleanly...")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass  # Handled by signal handler for clean shutdown
