@@ -78,7 +78,10 @@ def capture_image(path: str = "current.jpg") -> bool:
 
 
 def get_known_summary(memory: dict) -> str:
-    """Compact known-people list for vision prompt (filters out junk entries)."""
+    """Compact known-people list for vision prompt.
+    Uses stable identity descriptions (hair, face shape, etc.) per the spec's robustness requirements.
+    Filters out junk entries.
+    """
     lines = []
     for name, info in memory.get("known_people", {}).items():
         if not isinstance(info, dict):
@@ -93,8 +96,8 @@ def vision_detect_and_identify(image_path: str, memory: dict) -> tuple[bool, str
     """
     One vision call to:
     - Detect person presence
-    - Match against known people using the actual photo + stored visual signatures
-    - Return fresh 1-sentence description for memory
+    - Identify known people robustly (handles glasses on/off, different head orientations/poses, and varying lighting)
+    - Return a fresh description focused only on stable, identity-bearing features (per teddy_spec.md)
     """
     try:
         with open(image_path, "rb") as f:
@@ -104,18 +107,26 @@ def vision_detect_and_identify(image_path: str, memory: dict) -> tuple[bool, str
 
         prompt = f"""You are the vision module for an interactive teddy bear.
 
-Examine the image carefully.
+Your primary goal is reliable identification of known people despite real-world changes in appearance.
+
+IMPORTANT ROBUSTNESS RULES (follow these strictly):
+- Ignore whether the person is wearing glasses or not (people frequently put them on or take them off).
+- Ignore head orientation, pose, and camera angle (common variations include looking down at a laptop, turned slightly away, or 3/4 view).
+- Ignore lighting conditions, shadows, backlighting, or dim/bright environments.
+- Match identity based only on stable features. When in doubt about a match due to these variations, use UNKNOWN instead of guessing.
 
 Respond with EXACTLY three lines and nothing else:
 
 LINE 1: YES if you see a recognizable person (face or upper body clearly visible), otherwise NO.
 
 LINE 2: If LINE 1 is YES, output either:
-  - the exact name of a person from the Known People list below if the face/clothing/hair/glasses etc. is a confident visual match,
-  - or the single word UNKNOWN if it does not match any known person well.
+  - the exact name of a person from the Known People list below if this is a confident match to their identity (even if glasses, pose, or lighting differ from their stored visual signature),
+  - or the single word UNKNOWN if it does not match any known person well or confidence is low.
 If LINE 1 is NO, output UNKNOWN.
 
-LINE 3: If LINE 1 is YES, output ONE short objective sentence (max 20 words) describing distinctive visual features useful for future re-identification: hair, glasses, age appearance, facial hair, clothing color/style, face shape. No names, no greetings.
+LINE 3: If LINE 1 is YES, output ONE short objective sentence (max 20 words) describing stable, identity-bearing visual features useful for future re-identification. 
+Prioritize: hair style/color/length, face shape, facial hair, approximate age appearance, skin tone, distinctive facial features, typical clothing style.
+DO NOT mention or rely on: presence/absence of glasses, exact current clothing items or colors, current head pose/orientation, or lighting conditions. No names, no greetings.
 If LINE 1 is NO, leave LINE 3 blank.
 
 Known People (name: visual signature):
