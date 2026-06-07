@@ -35,7 +35,7 @@ def save_memory(memory: dict):
 
 
 def load_memory() -> dict:
-    memory = {"known_people": {}}
+    memory = {"known_people": {}, "known_objects": []}
     if MEMORY_FILE.exists():
         try:
             data = json.loads(MEMORY_FILE.read_text())
@@ -52,6 +52,10 @@ def load_memory() -> dict:
             upgraded[name] = {"desc": desc, "last_greeted": None}
         memory["known_people"] = upgraded
         save_memory(memory)
+
+    # Ensure known_objects list exists
+    if "known_objects" not in memory:
+        memory["known_objects"] = []
     return memory
 
 
@@ -320,12 +324,12 @@ def should_greet(person: dict | None) -> bool:
 
 
 def describe_scene(image_path: str) -> str:
-    """Describe the current scene, objects, environment, and any people for room scanning."""
+    """Identify distinct objects and furniture in the scene for room scanning. Ignore people."""
     try:
         with open(image_path, "rb") as f:
             base64_img = base64.b64encode(f.read()).decode("utf-8")
 
-        prompt = "Describe the scene, objects, furniture, environment, and any people visible. Be concise (1-2 sentences). Note any distinct people with brief appearance details if present."
+        prompt = "List all distinct objects, furniture, and environmental features visible in the image. Ignore any people or the person holding the camera. Output ONLY a comma-separated list, e.g. wooden desk, floral curtains, white wall, air conditioner. Be specific and concise. No other text."
 
         msg = HumanMessage(
             content=[
@@ -392,7 +396,7 @@ async def main():
                                 speak("Move the laptop to scan.")
                                 print("Teddy: Move the laptop to scan.")
                                 scanning = True
-                                scan_remaining = 30  # scan for ~30 seconds while user moves the laptop
+                                scan_remaining = 5  # scan for ~5 seconds while user moves the laptop
                         else:
                             print(f"   (saw {known_name} — skipping repeat greeting)")
                     else:
@@ -455,22 +459,28 @@ async def main():
                                 speak("Move the laptop to scan.")
                                 print("Teddy: Move the laptop to scan.")
                                 scanning = True
-                                scan_remaining = 30  # scan for ~30 seconds while user moves the laptop
+                                scan_remaining = 5  # scan for ~5 seconds while user moves the laptop
                         else:
                             print("Teddy: Can't get name.")
                             speak("Can't get name.")
                 else:
                     print("   No person detected.")
 
-                # Room scanning: describe scene as user pans the camera
+                # Room scanning: identify objects as user pans the camera
                 if scanning and scan_remaining > 0:
                     scan_remaining -= 1
                     scene_desc = describe_scene("current.jpg")
                     if scene_desc:
                         print(f"Teddy sees: {scene_desc}")
-                        # Speak the scene description as the camera is panned
-                        short = scene_desc[:110] + "..." if len(scene_desc) > 110 else scene_desc
-                        speak(short)
+                        # Parse comma-separated objects from the LLM response
+                        objects = [o.strip() for o in scene_desc.split(",") if o.strip()]
+                        known_objects = memory.get("known_objects", [])
+                        known_lower = [o.lower() for o in known_objects]
+                        new_objects = [o for o in objects if o.lower() not in known_lower]
+                        if new_objects:
+                            speak(f"I see {', '.join(new_objects)}")
+                            memory.setdefault("known_objects", []).extend(new_objects)
+                            save_memory(memory)
                     if scan_remaining <= 0:
                         scanning = False
 
